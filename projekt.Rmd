@@ -1,0 +1,428 @@
+---
+title: "Projekt - Analiza materiałów do tworzenia baterii"
+author: "Maryana Martyniuk"
+date: "`r format(Sys.Date(), '%d-%m-%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: "show"
+    highlight: zenburn
+---
+
+```{r ustawienia, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      out.width = "100%")
+```
+
+### Podsumowanie analizy
+Raport przedstawia analizę danych dotyczących materiałów stosowanych w bateriach, uwzględniając ich właściwości chemiczne i fizyczne.  Dane są kompletne, a metody przetwarzania umożliwiły usunięcie wartości odstających, co poprawiło jakość analizy. 
+Kluczowe obserwacje obejmują:
+<ul>
+<li> Większość baterii opiera się na **Li** jako głównym jonie. Natomiast jony, które znajdują się blisko **Li** w układzie okresowym są następnymi po popularności -   **Na**, **Mg** i **Ca**. </li>
+<li> Większość baterii charakteryzuje się stabilnym średnim (3-4 V) napięciem, umiarkowaną pojemnością wolumetryczną i grawimetryczną oraz stosunkowo niskimi wskaźnikami zmiany objętości dla danego kroku napięcia. </li>
+<li> Materiał baterii w stanie naładowanym najczęściej jest w postaci tlenku. 
+<li> Zdecydowana większość baterii ma udział atomowy składników w stanie naładowanym równy się 0. </li>
+<li> Większość baterii potrzebuje 1 lub 2 kroki napięcia od naładowania do rozładowania.</li>
+<li>Istnieją silne korelacje między parametrami opisującymi pojemność, energię i liczbę kroków napięcia. </li>
+</ul>
+
+Model stworzony do predykcji pojemności baterii, która jest jedną z najważniejszych właściwości, pokazuje, że udział atomowy składników w stanie rozładowanym wpływa na przewidywanie pojemności grawimetrycznej.
+
+### Wykorzystane biblioteki
+W raporcie wykorzystano następujące biblioteki:
+```{r install_packages}
+# do napisania raportu
+library(knitr)
+
+# do pracy z data.frame
+library(dplyr)
+
+# do budowanie modelu
+library(caret)
+library(xgboost)
+library(Metrics)
+
+# do równoległego wykonania
+library(doParallel)
+
+# do wizualizacji
+library(ggplot2)
+library(plotly)
+library(ggcorrplot)
+library(RColorBrewer)
+library(kableExtra)
+library(DT)
+```
+
+### Powtarzalność wyników 
+Powtarzalność wyników jest zapewniona ustawieniem seed.
+```{r repetable}
+set.seed(7)
+```
+
+### Wczytanie danych o bateriach z pliku
+Do wczytania danych z pliku .csv użyto funckji **read.csv**. Najpierw wczytano 100 wierszy, ustalono ich typ i użyto tej informacji do wczytania już całego zbioru danych.
+```{r receive_data}
+initial <- read.csv("mp_batteries.csv", nrows = 100)
+classes <- sapply(initial, class)
+df <- read.csv("mp_batteries.csv",
+                     colClasses = classes)
+```
+Pierwsze 10 wierszy wczytanych danych wyglądają w następujący sposób:
+```{r data_head, echo = FALSE}
+knitr::kable(head(df, 10)) %>%
+  kable_paper() %>%
+  scroll_box(height = '100%', width = '850px' ) %>%  
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+### Przetwarzanie brakujących danych
+Wykorzystano funckje **complete.cases**, która zwraca "1" dla wierszy "pełnych" tzn. które nie zawierają NA. Porównano sumę  "1" z liczbą wierszy w zbiorze danych i te liczbe są takie same. To oznacza, że w zbiorze nie ma wartosci brakujących.
+```{r clean_data}
+complete_rows <- sum(complete.cases(df))
+rows_with_NA <- nrow(df) - complete_rows
+rows_with_NA
+```
+
+### Podstawowe statystyki zbióru danych
+Zbiór danych składa się z **`r nrow(df)`** wierszy i **`r ncol(df)`** atrybutów. Poniżej przedstawione podstawowe statystki poszczególnych atrybutów, które są wynikiem funkcji **summary**.
+``` {r data_summary}
+
+knitr::kable(summary(df)) %>%
+  kable_paper() %>%
+  scroll_box(height = '100%') %>%  
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+### Szczegółowa analiza atrybutów
+W tej sekcji przedstawiona analiza kolejnych atrybutów w zbiorze danych - krótki opis obserwacji na podstawie tabel/wykresów.
+
+##### **Główny jon**
+Najczęściej w materiałach do baterii **Li** jest głównym jonem. Dalej po popularności są **Ca**, **Mg**, **Zn** i **Na**.
+```{r analysis_1}
+ion_counts <- as.data.frame(table(df$Working.Ion))
+ion_counts <- arrange(ion_counts, desc(Freq))
+knitr::kable(ion_counts,  col.names = c("Working Ion", "Count")) %>%  
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+##### **Wzór chemiczny materiału baterii w stanie naładowanym**
+Materiał baterii w stanie naładowanym jest najczęściej przedstawiony w postaci tlenków tzn. związków chemicznych, zbudowanych z tlenu i innego pierwiastka chemicznego.
+```{r analysis_2}
+formula_charge_counts <- as.data.frame(table(df$Formula.Charge))
+formula_charge_counts <- arrange(formula_charge_counts, desc(Freq))
+datatable(colnames = c("Formula Charge", "Count"), formula_charge_counts)
+```
+
+##### **Wzór chemiczny materiału baterii w stanie rozładowanym**
+Materiał baterii w stanie rozładowanym najcześciej zawiera **Li**, co może wynikać z tego, że on jest najpopularniejszym głównym jonem.
+```{r analysis_3}
+formula_discharge_counts <- as.data.frame(table(df$Formula.Discharge))
+formula_discharge_counts <- arrange(formula_discharge_counts, desc(Freq))
+datatable(formula_discharge_counts,colnames = c("Formula Discharge", "Count") )
+```
+
+<br />
+<br />
+
+##### **Atrybuty ciągłe**
+Atrybuty ciągłe opisano za pomocą histogramów, gdzie ze źródłowych danych zostały usunięty outliery. Wykorzystano do tego **IQR rule**. W taki sposób usunięto dane powyżej i poniżej wyżnaczonych granic.
+
+``` {r echo = FALSE}
+# https://stackoverflow.com/questions/69181986/how-to-identify-and-remove-outliers-in-a-data-frame-using-r
+remove_outliers <- function(data, column_name) {
+  col <- data[[column_name]]
+  
+  # Calculate Q1, Q3, and IQR
+  Q1 <- quantile(col, 0.25, na.rm = TRUE)
+  Q3 <- quantile(col, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+
+  upper_bound <- Q3 + 1.5 * IQR
+  lower_bound <- Q1 - 1.5 * IQR
+
+  
+  # Filter the data to remove outliers
+  cleaned_data <- data[col <= upper_bound & col >= lower_bound, ]
+  
+  return(cleaned_data)
+}
+
+```
+
+
+<br />
+
+##### **Zmiana objętości w % dla danego kroku napięcia oraz średnie napięcie**
+Większość baterii charakteryzuje się zmianą objętości w % dla danego kroku napięcia w przedziale [0, 0.05] i średnim napięciem w okolicach 3 V.
+``` {r analysis_4}
+plot_1 <- ggplot2::ggplot(remove_outliers(df, "Max.Delta.Volume"), ggplot2::aes(Max.Delta.Volume, fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 0.01) + ggplot2::theme_bw() + scale_fill_brewer(palette = "Spectral") + 
+  labs(title = 'Histogram atrybutu Max.Delta.Volume', x = 'Zmiana objętości w % dla danego kroku napięcia', y = 'Liczba baterii')
+ggplotly(plot_1)
+
+
+plot_2 <- ggplot2::ggplot(remove_outliers(df, "Average.Voltage"), ggplot2::aes(Average.Voltage, fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 1) + ggplot2::theme_bw() + scale_fill_brewer(palette = "Spectral") + 
+  labs(title = 'Histogram atrybutu Average.Voltage', x = 'Średnie napięcie dla poszczególnego kroku napięcia', y = 'Liczba baterii')
+ggplotly(plot_2)
+```
+
+##### **Pojemność grawimetryczna i wolumetryczna**
+Większość baterii charakteryzuje się pojemnością grawimetryczną w przedziale [30, 200] i pojemnością wolumetryczną w przedziale [150,650]
+```{r analysis_5}
+plot_3 <- ggplot2::ggplot(remove_outliers(df, "Gravimetric.Capacity"), ggplot2::aes(Gravimetric.Capacity, fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 10) + ggplot2::theme_bw() + scale_fill_brewer(palette = "Spectral") + 
+  labs(title = 'Histogram atrybutu Gravimetric.Capacity', x = 'Pojemność grawimetryczna mAh/g', y = 'Liczba baterii')
+ggplotly(plot_3)
+
+
+plot_4 <- ggplot2::ggplot(remove_outliers(df, "Volumetric.Capacity"), ggplot2::aes(Volumetric.Capacity,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 50) + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+  labs(title = 'Histogram atrybutu Volumetric.Capacity', x = 'Pojemność wolumetryczna mAh/cm³', y = 'Liczba baterii')
+ggplotly(plot_4)
+```
+
+##### **Energia grawimetryczna i wolumetryczna**
+Większość baterii charakteryzuje się energią grawimetryczną w przedziale [0, 750] i energią wolumetryczną w przedziale [0, 2800]
+```{r analysis_6}
+plot_5 <- ggplot2::ggplot(remove_outliers(df, "Gravimetric.Energy"), ggplot2::aes(Gravimetric.Energy,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 50) + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+    labs(title = 'Histogram atrybutu Gravimetric.Energy', x = 'Energia grawimetryczna Wh/kg', y = 'Liczba baterii')
+ggplotly(plot_5)
+
+
+plot_6 <- ggplot2::ggplot(remove_outliers(df, "Volumetric.Energy"), ggplot2::aes(Volumetric.Energy,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 200) + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+    labs(title = 'Histogram atrybutu Volumetric.Energy', x = 'Energia wolumetryczna Wh/L', y = 'Liczba baterii')
+ggplotly(plot_6)
+```
+
+##### **Udział atomowy składników w stanie naładowanym i rozładowanym**
+Zdecydowana większość baterii ma udział atomowy składników w stanie **naładowanym** równy się 0. Z **`r nrow(df)`** baterii  **`r nrow(filter(df,Atomic.Fraction.Charge == 0))`** baterii mają taką wartość atrybutu. Większość baterii charakteryzuje się udziałem atomowym składników w stanie **rozładowanym** w przedziale [0.045, 0.255]. W tym przedziale bardzo mała ilość baterii jest z udziałem atomowym składników w stanie **rozładowanym** w przedziale [0.24, 0.255]
+
+```{r analysis_7}
+plot_7 <- ggplot2::ggplot(remove_outliers(df, "Atomic.Fraction.Charge"), ggplot2::aes(Atomic.Fraction.Charge,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram() + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+    labs(title = 'Histogram atrybutu Atomic.Fraction.Charge', x = 'Udział atomowy składników w stanie naładowanym', y = 'Liczba baterii')
+ggplotly(plot_7)
+
+
+plot_8 <- ggplot2::ggplot(remove_outliers(df, "Atomic.Fraction.Discharge"), ggplot2::aes(Atomic.Fraction.Discharge,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 0.015) + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+    labs(title = 'Histogram atrybutu Atomic.Fraction.Discharge', x = 'Udział atomowy składników w stanie rozładowanym', y = 'Liczba baterii')
+ggplotly(plot_8)
+```
+
+##### **Wskaźnik stabilności materiału w stanie naładowanym i rozładowanym**
+Większość baterii charakteryzuje się wskaźnikiem stabilności materiału w stanie **naładowanym** [0, 0.12] i w stanie **rozładowanym** w przedziale [0, 0.0975]
+```{r analysis_8}
+
+plot_9 <- ggplot2::ggplot(remove_outliers(df, "Stability.Charge"), ggplot2::aes(Stability.Charge,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 0.01) + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+    labs(title = 'Histogram atrybutu Stability.Charge', x = 'Wskaźnik stabilności materiału w stanie naładowanym', y = 'Liczba baterii')
+ggplotly(plot_9)
+
+
+plot_10 <- ggplot2::ggplot(remove_outliers(df, "Stability.Discharge"), ggplot2::aes(x = Stability.Discharge,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 0.0075) + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+    labs(title = 'Histogram atrybutu Stability.Discharge', x = 'Wskaźnik stabilności materiału w stanie rozładowanym', y = 'Liczba baterii')
+ggplotly(plot_10)
+
+```
+
+##### **Liczba odrębnych kroków napięcia od pełnego naładowania do rozładowania i maksymalna bezwzględna różnica między sąsiednimi krokami napięcia**
+W przypadku tych atrybutów **outliery nie zostały usunięte**.
+
+Ponieważ atrybut **liczba odrębnych kroków napięcia od pełnego naładowania do rozładowania** zawiera dane całkowitoliczbowe od 1 do 6, to przedstawiono ile baterii ma określoną wartość wraz z histogramem aby wyświetlić też informacje o głównym jonie. Większość baterii potrzebuje 1 lub 2 kroki napięcia od naładowania do rozładowania.
+```{r analysis_9}
+ion_counts <- as.data.frame(table(df$Steps))
+ion_counts <- arrange(ion_counts, desc(Freq))
+knitr::kable(ion_counts,  col.names = c("Steps", "Count")) %>%  
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+
+plot_11 <- ggplot2::ggplot(df, ggplot2::aes(x = Steps,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 1) + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+    labs(title = 'Histogram atrybutu Steps', x = 'Liczba odrębnych kroków napięcia od pełnego naładowania do rozładowania', y = 'Liczba baterii')
+ggplotly(plot_11)
+
+```
+Dla atrybutu **maksymalna bezwzględna różnica między sąsiednimi krokami napięcia** przedstawiono histogram oraz tabele z ilością baterii, dla których wartość tego atrybutu zaokrąglano w górę do najbliższej liczby całkowitej.
+Z **`r nrow(df)`** baterii  **`r nrow(filter(df,Max.Voltage.Step == 0))`** baterii ma maksymalną bezwzględną różnica między sąsiednimi krokami napięcia równą 0. Istnieje również outlier z wartością **`r max(df$Max.Voltage.Step)`**
+```{r analysis_10}
+intervals <- ceiling(df$Max.Voltage.Step)
+interval_counts_df <- as.data.frame(table(intervals))
+colnames(interval_counts_df) <- c("ceiling", "count")
+knitr::kable(interval_counts_df,  col.names = c("Max.Voltage.Step ceiling", "Count")) %>%  
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+
+plot_12 <- ggplot2::ggplot(df, ggplot2::aes(x = Max.Voltage.Step,  fill = Working.Ion)) + 
+  ggplot2::geom_histogram(binwidth = 1) + ggplot2::theme_bw()  + scale_fill_brewer(palette = "Spectral") +
+    labs(title = 'Histogram atrybutu Max.Voltage.Step', x = 'Maksymalna bezwzględna różnica między sąsiednimi krokami napięcia', y = 'Liczba baterii')
+ggplotly(plot_12)
+
+```
+
+
+### Macierz korelacji
+Korelacja pomiędzy wszystkimi atrybutami numerycznymi zbioru przedstawiona na macierzach korelacji.
+Zastosowano dwie metody - Piersona oraz Spearmana.
+Metoda Piersona pozwala na określenie, czy istnieje związek liniowy między dwoma zmiennymi. Natomiast metoda Spearmana służy do pomiaru monotonicznej relacji między dwiema zmiennymi. Może ona zapewnić dokładniejsze wyniki, ponieważ nie jest tak dotknięta wartościami ekstremalnymi, jak współczynnik korelacji Pearsona.
+
+Na podstawie macierz można zauważyć, że pary atrybutów **Gravimetric.Energy - Volumetric.Energy**,
+**Gravimetric.Capacity -  Volumetric.Capacity**, **Average.Voltage - Gravimetric.Energy**, **Average.Voltage - Volumetric.Energy**, 
+**Atomic.Fraction.Charge - Atomic.Fraction.Discharge**,  **Gravimetric.Capacity - Atomic.Fraction.Discharge**, **Steps - Max.Voltage.Step** są silnie skorelowane przy stosowaniu obu metod (współczynniki są większe od 0.5).
+
+Współczynnik Spearmana pokazuje wyraźniej, że wraz ze wzrostem/spadkiem wartości atrybutu **Steps** tak samo wzrasta/spada wartość atrybutu **Max.Voltage.Step**, bo równa się 1. Podobnie jest z atrybutami **Gravimetric.Capacity -  Volumetric.Capacity** oraz **Gravimetric.Energy - Volumetric.Energy**, co wynika z tego, że opisują takie same własności - energię oraz pojemność baterii.
+
+<!-- Zródła:
+https://www.sthda.com/english/wiki/correlation-test-between-two-variables-in-r
+https://www.sthda.com/english/wiki/ggcorrplot-visualization-of-a-correlation-matrix-using-ggplot2
+https://www.ibm.com/docs/pl/spss-statistics/saas?topic=correlations-power-analysis-one-sample-spearman-correlation-test
+https://www.analytixlabs.co.in/blog/spearman-vs-pearson-correlation/ -->
+```{r correlation}
+
+df_numeric <- df %>% select(where(is.numeric))
+
+correlation_matrix <- df_numeric %>% cor(use = "all.obs", method="pearson")
+correlation_plot <- correlation_matrix %>% 
+  ggcorrplot(type="lower", outline.col = "white", lab = TRUE, lab_size = 3, legend.title = "Pearson correlation", colors = c("#6D9EC1", "white", "#E46726")) +
+  labs(x = 'Atrybut 1', y = 'Atrybut 2') + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggplotly(correlation_plot) %>% layout( width = 850, 
+    height = 530)
+
+
+correlation_matrix_2 <- df_numeric %>% cor(use = "all.obs", method="spearman")
+correlation_plot_2 <- correlation_matrix_2 %>% 
+  ggcorrplot(type="lower", outline.col = "white", lab = TRUE, lab_size = 3, legend.title = "Spearman correlation", colors = c("#6D9EC1", "white", "#E46726")) +
+  labs(x = 'Atrybut 1', y = 'Atrybut 2') + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggplotly(correlation_plot_2) %>% layout( width = 850, 
+    height = 530)
+
+
+```
+</br>
+
+
+### Trendy w materiałach dla baterii
+Najbardziej popularnym głównym jonem w przedstawionym zbiorze jest **Li **. Takie baterii charakteryzują się dobrą pojemnością oraz stabilnością w stanie naładownym i rozładowanym. Dla baterii zarówno ważne jest aby nie miała efektu pamięci. To jest zjawisko powodujące utratę pojemności baterii. Przy powszechnym stosowaniu baterii wiekszej pojemności (np. dla samochodów elektrycznych) dużo rolę ma trwałość baterii. Ale te dane nie zostałe przedstawione w zbiorze danych. 
+</br>
+Inne mniej popularnie, ale w podobnej ilości przedstawione w zbiorze są  baterii z **Ca **, **Mg **, **Na ** oraz **Zn** jak głównym jonem. **Li**, **Na**, **Mg** i **Ca** mają pewne podobieństwa chemiczne, ponieważ znajdują się w sąsiednich grupach układu okresowego. Te pierwiastki mają tendencję do oddawania elektronów w procesie jonizacji.
+</br>
+W przyszłości badania mogą koncentrować się na ulepszeniu baterii z **Li**, bo on dominuje na rynku dzisiaj. Badać jak można łagodzić degradacje, zwiększyć trwałości tzn. zwiększyć żywotność. Badania nad bateriami z **Ca**, **Mg** i **Na** jak głównym jonem jako alternatywa do **Li** będą kontynuowane, ale muszę skupiać się na komercyjnym zastosowaniu i skalowalności. 
+</br>
+
+Artykuły:
+</br>
+1. Clare P. Grey and David S. Hall, **Prospects for lithium-ion batteries and beyond—a 2030 vision**. *Nature Communications*, [https://www.nature.com/articles/s41467-020-19991-4](https://www.nature.com/articles/s41467-020-19991-4).
+</br>
+2. Tsuyoshi Sasaki, Yoshio Ukyo, and Petr Novák, **Memory Effect in a Lithium-ion Battery**, [https://www.tytlabs.co.jp/en/review/issue/files/453_057sasaki.pdf](https://www.tytlabs.co.jp/en/review/issue/files/453_057sasaki.pdf).
+
+
+
+### Przewidywanie dalszych własności baterii
+Ponieważ pojemność w bateriach jest bardzo ważna, to spróbowano na podstawie wybranych atrybutów ze zbioru przewidzieć wartość atrybutu **Gravimetric.Capacity**.
+
+<!--
+https://www.geeksforgeeks.org/how-to-use-xgboost-algorithm-for-regression-in-r/
+https://miroslawmamczur.pl/czym-jest-wzmocnienie-gradientowe-gradient-boosting-i-dlaczego-jest-taki-dobry/ - po polskiu
+https://www.statology.org/xgboost-in-r/
+https://www.appsilon.com/post/r-xgboost - kod -->
+
+``` {r training, echo = FALSE}
+num_cores <- detectCores() - 2  # Use two less core than available
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+```
+
+Wybrane zostały atrybuty - **Gravimetric.Energy**, **Atomic.Fraction.Discharge**, **Atomic.Fraction.Charge**, **Stability.Discharge**,  **Max.Delta.Volume**, **Atomic.Fraction.Charge** oraz **Stability.Charge**. Zbiór został podzielony na testowy (20%) i treningowy (80%).
+
+``` {r }
+data <- dplyr::select(df, Gravimetric.Capacity, Gravimetric.Energy, Atomic.Fraction.Discharge, Atomic.Fraction.Charge, Stability.Discharge, Max.Delta.Volume, Stability.Charge, Atomic.Fraction.Charge)
+
+index <- createDataPartition(data$Gravimetric.Capacity, p = 0.8, list = FALSE)
+trainData  <- data[index, ]
+testData <- data[-index, ]
+
+plot<- ggplot2::ggplot(alpha = 0.65) + 
+  ggplot2::geom_density(aes(Gravimetric.Capacity, fill = "Zbior treningowy"), trainData) +
+  ggplot2::geom_density(aes(Gravimetric.Capacity, fill = "Zbior testowy"), testData) +
+  ggplot2::labs(x = "Gravimetric.Capacity", title = "Porównanie rozkładu zbiorów testowego i treningowego") + ggplot2::theme_bw()
+
+ggplotly(plot)
+```
+
+Zostało użyte wzmocnienie gradientowe (Gradient Boosting) z parametrami - max.depth = 5 (maksymalna głębokość drzewa) oraz nrounds = 30 (maksymalna liczba iteracji). W wyniku otrzymano ponizszy model:
+``` {r echo=FALSE}
+#fit XGBoost model - do wybrania parametrów
+# watchlist = list(train=xgb_train, test=xgb_test)
+#model = xgb.train(data = xgb_train, max.depth = 3, watchlist=watchlist, nrounds = 300)
+```
+
+``` {r}
+train_x <- as.matrix(trainData %>% select(-Gravimetric.Capacity))
+train_y <- trainData$Gravimetric.Capacity
+test_x <- as.matrix(testData %>% select(-Gravimetric.Capacity))
+test_y <- testData$Gravimetric.Capacity
+
+xgb_train = xgb.DMatrix(data = train_x, label = train_y)
+xgb_test = xgb.DMatrix(data = test_x, label = test_y)
+
+xgb_model <- xgb.train(data = xgb_train, max.depth = 5, nrounds = 300, verbose = 1)
+xgb_model
+
+```
+
+Została wyliczona ważność atrybutów przy podejmowaniu decyzji. Widać, że najważniejsze są atrybuty **Atomic.Fraction.Discharge** i **Max.Delta.Volume**.
+```{r}
+importance_matrix <- xgb.importance(feature_names = colnames(xgb_train), model = xgb_model)
+xgb.plot.importance(importance_matrix, left_margin = 12)
+
+
+```
+
+```{r echo = FALSE}
+stopCluster(cl)
+
+```
+Dokonano porównania wartości rzeczywistych z tymi, które przewidział model i przedstawiono na wykresie. Z wykresu wynika, że model dobrze przewiduje wartości do 500, bo ich przedstawiono dużo w zbiorze, natomiast z większymi wartościami występują większe błędy.
+``` {r}
+xgb_preds <- predict(xgb_model, test_x)
+xgb_preds <- as.data.frame(xgb_preds)
+colnames(xgb_preds) <- c("Gravimetric.Capacity")
+
+
+comparison <- data.frame(
+  Actual = test_y,
+  Predicted = xgb_preds$Gravimetric.Capacity
+)
+
+prediction_actual_plot <- ggplot(comparison, aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.65, color = 'blue') +
+  geom_abline(intercept = 0, slope = 1, color = 'red', linetype = "dashed") +
+  labs(
+    x = "Wartości rzeczywiste",
+    y = "Predykcje",
+    title = "Porównanie predykcji z rzeczywistymi wartościami"
+  ) +
+  theme_bw()
+
+ggplotly(prediction_actual_plot)
+
+```
+Funckje oceny modelu  - MAE - **`r caret::MAE(test_y, xgb_preds$Gravimetric.Capacity)`** oraz 
+RMSE - **`r caret::RMSE(test_y, xgb_preds$Gravimetric.Capacity)`**
+
+
